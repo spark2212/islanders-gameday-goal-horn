@@ -11,48 +11,59 @@ import kbHitMod
 import math
 import scipy.io.wavfile
 
-MODEL_PATH = MODEL_PATH = "/Users/schoolwork/Documents/Goal_Horn_Project_Stuff/Goal_Horn_Program/Goal_Horn_Program_Subsets/Goal_Model_2.model"
-
-OT_GOAL_TRACK = "1 New York Islanders Overtime Goal and Win Horn || NYCB Live: Home of the Nassau Veterans Memorial Coliseum"
-WIN_TRACK = "2 New York Islanders Win Horn || NYCB Live: Home of the Nassau Veterans Memorial Coliseum"
-GOAL_TRACK = "3 New York Islanders Goal Horn || NYCB Live Home of the Nassau Veterans Memorial Coliseum"
-QUIET_TRACK = "4 pure silence"
-
-STOP_COMMAND = "osascript -e 'tell application \"iTunes\" to stop'"
-
 WIN = 0
 NO_GOAL = 1
 GOAL = 2
+STATUS_TRACK_LENGTH = 6
+
+overtime = False
+shootout = False
+quit_ = False
+demo = False
+remote = False
+mode = NO_GOAL
+
+OT_GOAL_TRACK = "01 New York Islanders Overtime Goal and Win Horn || NYCB Live: Home of the Nassau Veterans Memorial Coliseum"
+
+WIN_TRACK = "02 New York Islanders Win Horn || NYCB Live: Home of the Nassau Veterans Memorial Coliseum"
+
+GOAL_TRACK = "03 New York Islanders Goal Horn || NYCB Live: Home of the Nassau Veterans Memorial Coliseum"
+
+QUIET_TRACK = "04 pure silence"
+
+STATUS_NAME_INDEX = 0; STATUS_CHANGE_INDEX = 1; STATUS_QUICK_CHANGE_INDEX = 2; STATUS_ON_OFF = 3
+
+CANCEL_INDEX = 0; OT_INDEX = 1; SO_INDEX = 2; REGULATION_INDEX = 3; DEMO_INDEX = 4; REMOTE_INDEX = 5; QUIT_INDEX = 6; TAPS_INDEX = 7; CALIBRATE_INDEX = 8; STATUS_CHECK_INDEX = 9
+
+OFF = 0; ON = 1; MODE_STATUS = [OFF, ON]
+
+STATUS_TRACKS = [
+    ["Say the word 'cancel'", "Say, 'Currently in overtime mode'", "Say, 'Currently in shootout mode'", "Say, 'Currently in regulation mode'", "Say the word 'demo'", "Say the word 'remote'", "Say the word 'quit'", "Say the word 'Taps'"],
+    ["Pause now to cancel", "Pause now for overtime", "Pause now for shootout", "Pause now for regulation", "Pause now for demo", "Pause now for remote", "Pause now to quit program", "Pause now for Taps", "Pause now for status check"],
+    ["05 Quick change to cancel", "06 Quick change to overtime", "07 Quick change to shootout", "08 Quick change to regulation", "09 Quick change to demo", "10 Quick change to remote", "11 Quick change to quit", "12 Quick change to Taps", "13 Quick change to calibrate volume", "14 Quick change to status check"],
+    ["Say the word 'off'", "Say the word 'on'"]
+]
+
+mode_names = ["WIN", "NO_GOAL", "GOAL"]
+
+MODEL_PATH = MODEL_PATH = "/Users/schoolwork/Documents/Goal_Horn_Project_Stuff/Goal_Horn_Program/Goal_Horn_Program_Subsets/Goal_Model_2.model"
+
+FALSE_NEGATIVE = "/Users/schoolwork/Documents/Goal_Horn_Project_Stuff/Goal_Horn_Program/Goal_Horn_Program_Subsets/TBD_FILES/probable_false_negative_"
+
+TRIGGER_POSITIVE = "/Users/schoolwork/Documents/Goal_Horn_Project_Stuff/Goal_Horn_Program/Goal_Horn_Program_Subsets/TBD_FILES/just_before_the_trigger_"
+
+LOG_FILE = "/Users/schoolwork/Documents/Goal_Horn_Project_Stuff/Goal_Horn_Program/Goal_Horn_Program_Subsets/TBD_FILES/new_reoccurring_samples_"
 
 model = keras.models.load_model(MODEL_PATH, compile=True)
 
-class Counter:
-    def __init__(self, start_val=None):
-        if start_val is None:
-            start_val = 0
-            
-        self.value = start_val
-        self.v0 = start_val
-        
-    def add(self):
-        self.value += 1
-    
-    def reset(self, new_val=None):
-        if new_val is None: 
-            new_val = self.v0
-
-        self.value = new_val
-        self.v0 = new_val
-    
-    def get(self):
-        return self.value
-
+## CLASSES ######################################
 
 class RingBuffer:
     """ class that implements a not-yet-full buffer """
     def __init__(self,size_max):
         self.max = size_max
         self.data = []
+        self.diff = 0
 
     class __Full:
         """ class that implements a full buffer """
@@ -60,14 +71,20 @@ class RingBuffer:
             """ Append an element overwriting the oldest one. """
             self.data[self.cur] = x
             self.cur = (self.cur+1) % self.max
+            self.diff += 1
         def get(self):
             """ return list of elements in correct order """
             return self.data[self.cur:]+self.data[:self.cur]
 
+        def get_diff(self):
+            diff = self.diff
+            self.diff = 0
+            return diff
 
     def append(self,x):
         """append an element at the end of the buffer"""
         self.data.append(x)
+        self.diff += 1
         if len(self.data) == self.max:
             self.cur = 0
             # Permanently change self's class from non-full to full
@@ -76,6 +93,11 @@ class RingBuffer:
     def get(self):
         """ Return a list of elements from the oldest to the newest. """
         return self.data
+
+    def get_diff(self):
+            diff = self.diff
+            self.diff = 0
+            return diff
 
 class ShutdownTimer:
     """Class that defines circumstances that trigger the end of the program"""
@@ -142,52 +164,159 @@ class ShutdownTimer:
         self.start = time.time()
         self.runtime = 0
 
-# ring buffer will keep the last 1 second worth of audio
+    def addTime(self, delta_t):
+        self.target += delta_t
+
+class Counter:
+    def __init__(self, start_val=None):
+        if start_val is None:
+            start_val = 0
+            
+        self.value = start_val
+        self.v0 = start_val
+        
+    def add(self):
+        self.value += 1
+    
+    def reset(self, new_val=None):
+        if new_val is None: 
+            new_val = self.v0
+
+        self.value = new_val
+        self.v0 = new_val
+    
+    def get(self):
+        return self.value
+    def gets(self):
+        output = str(self.value)
+        return output.zfill(3)
+
+## CLASS ITEMS INSTANTIATED #######################
+
 ringBuffer = RingBuffer(1*22050)
-ringBuffer2 = RingBuffer(30)
-ringBuffer3 = RingBuffer(30)
+ringBuffer2 = RingBuffer(50) # Was 36 
+ringBuffer2a = RingBuffer(50)
+ringBuffer3 = RingBuffer(25) # Was 36
 
 pauseTimer = ShutdownTimer()
-shutdownTimer = ShutdownTimer()
-saveTimer = ShutdownTimer()
 logTimer = ShutdownTimer()
-confirmTimer = ShutdownTimer()
-helpTimer = ShutdownTimer()
-freqTimer = ShutdownTimer()
+cooldownTimer = ShutdownTimer()
+totalTimer = ShutdownTimer()
 
-INTERVAL = 3600
-MIN_THRESH = -14 * 0 # set THRESHOLD to zero because of imbalance towards collecting NO_GOAL data
-MAX_THRESH = -8 * 0
-THRESHOLD = MIN_THRESH
+false_num = Counter(1) 
+false_num2 = Counter(1)
+trigger_num = Counter(1) 
+trigger_num2 = Counter(1) 
+log_num = Counter(1)
+log_num2 = Counter(1)
 
-overtime = False
-shootout = False
-quit_ = False
-demo = False
-remote = False
+logTime = 0
+total_pause_time = 0
 
-mode_names = ["WIN", "NO_GOAL", "GOAL"]
+cooled = 0
+loop_thru = False
 
-n = Counter(0) # logTimer
-i = Counter(1) # Win
-i2 = Counter(1) # Actually No Win
-i3 = Counter(1) # Actually Win
-j = Counter(1) # No goal
-k = Counter(1) # Goal
-k2 = Counter(1) # Actually No Goal
-k3 = Counter(1) # Actually Goal
-w = Counter(1) # TBD label 1
-w2 = Counter(1) # TBD label 2
-h = Counter(1) # False Negative
-h2 = Counter(1) # True Positive
-h3 = Counter(1) # Trigger
-g = Counter(1) # Early Cancel 1
-g2 = Counter(1) # Early Cancel 2
 
-mode = NO_GOAL
+## FUNCTION DEFINITIONS #######################################
 
-print("\nOvertime mode: off\nShootout mode: off\nDemo mode: off\nRemote control: off")
+def runApp(app_name):
+    subprocess.getoutput("osascript -e 'tell application \"" + app_name + "\" run'")
+
+def printStatus(overtime, shootout, demo, remote):
+    if overtime: print("\nOvertime mode: ON")
+    else: print("\nOvertime mode: off")
+
+    if shootout: print("Shootout mode: ON")
+    else: print("Shootout mode: off")
+
+    if demo: print("Demo mode: ON")
+    else: print("Demo mode: off")
+
+    if remote: print("Remote control: ON")
+    else: print("Remote control: off")
+
+def convert_time(seconds, sep=None, shorten=False):
+    hours = math.floor(seconds/3600)
+    seconds -= hours * 3600
+
+    mins = math.floor(seconds/60)
+    seconds -= mins * 60
     
+    seconds = math.floor(seconds)
+
+    separator = [" hours, ", " minutes and ", " seconds"]
+    i = 0
+
+    if sep is not None:
+        separator.append(sep)
+        separator.append(sep)
+        separator.append(None)
+        i = 3
+
+    time = str(hours) + separator[i]; i += 1
+    
+    if mins < 10:
+        time += "0"
+    
+    time += str(mins) + separator[i]; i += 1
+    if seconds < 10:
+        time += "0"
+    
+    time += str(seconds)
+    if separator[i] is not None:
+        time += separator[i]
+
+    if hours == 0 and shorten == True:
+        if mins > 0:
+            time = str(mins) + separator[i-1]
+            time += str(seconds)
+            if separator[i] is not None:
+                time += separator[i]
+        else:
+            time = str(seconds)
+            if separator[i] is not None:
+                time += separator[i]
+
+    return time
+
+def is_integer(n):
+    try:
+        float(n)
+    except ValueError:
+        return False
+    else:
+        return float(n).is_integer()
+
+def delay(t):
+    t0 = time.time()
+
+    if t < 0:
+        print("negative timer!")
+        t = 0
+    elif t > 300:
+        print("I'm not waiting more than five minutes!")
+        t = 300
+
+    while time.time() - t0 <= t: 1
+    return
+
+def flash_screen(num_times=3, num_loops=5):
+
+    script = """osascript -e '
+    tell application "System Preferences"
+        run
+        reveal anchor "Hearing" of pane id "com.apple.preference.universalaccess"
+    end tell
+    tell application "System Events" to tell process "System Preferences" to click button "Test Screen Flash" of window "Accessibility" of application process "System Preferences" of application "System Events"'
+    """
+
+    for j in range(num_loops):
+        for i in range(num_times):
+            subprocess.getoutput(script)
+            delay(0.5)
+
+        delay(1)
+
 def getState():
     return subprocess.getoutput("osascript -e 'tell application \"iTunes\" to player state as string'") 
 
@@ -216,30 +345,143 @@ def setVolume(vol, direction=None):
 
     subprocess.getoutput("osascript -e 'tell application \"iTunes\" to set sound volume to " + str(new_V) + "'")
 
-def play(track_name):
-    #subprocess.getoutput(STOP_COMMAND)
-    subprocess.getoutput("osascript -e 'tell application \"iTunes\" to play (first track of playlist \"Library\" whose name is \"" + track_name + "\")'")
+def getCurTime():
+    curTime = subprocess.getoutput("osascript -e 'tell application \"iTunes\" to player position'")
+
+    if curTime == "missing value":
+        return 0
+    else:
+        return float(curTime)
+
+def getSongLength():
+    print("Song length == {}".format(subprocess.getoutput("osascript -e 'tell application \"iTunes\" to finish of current track as float'")))
+    return float(subprocess.getoutput("osascript -e 'tell application \"iTunes\" to duration of current track as float'"))
+
+def setCurTime(cursor):
+    """
+    maxTime = getSongLength()
+    if cursor < 0:
+        cursor = 0
+    elif cursor > maxTime:
+        cursor = getSongLength()
+    """
+
+    subprocess.getoutput("osascript -e 'tell application \"iTunes\" to set player position to " + str(cursor) + "'")
+
+def play(track_name=None, playlist="All New York Islanders Goal Horns", curTime=None):
+    if track_name is None:
+        subprocess.getoutput("osascript -e 'tell application \"iTunes\" to play'")
+
+        if curTime is not None:
+            setCurTime(curTime)
+    else:
+        subprocess.getoutput("osascript -e 'tell application \"iTunes\" to play (first track of playlist \"" + playlist + "\" whose name is \"" + track_name + "\")'")
+
+        cur = 0
+        if curTime is not None:
+            cur = curTime
+
+        if math.floor(cur) != math.floor(getCurTime()):
+            setCurTime(cur)
+
+
+    if getState() != "playing":
+        if track_name is None:
+            print("\nUnable to begin playback!")
+            flash_screen(3, 2)
+
+        else:
+            print("Track \"" + track_name + "\" not found in playlist \"" + playlist + "\".\nSearching in full library...")
+
+            subprocess.getoutput("osascript -e 'tell application \"iTunes\" to play (first track of playlist \"Library\" whose name is \"" + track_name + "\")'")
+
+            if getState == "playing":
+                cur = 0
+                if curTime is not None:
+                    cur = curTime
+
+                if math.floor(cur) != math.floor(getCurTime()):
+                    setCurTime(cur)
+            else:
+                print("Track \"" + track_name + "\" does not exist. ")
+                flash_screen(3, 2)
+
 
 def stop():
-    subprocess.getoutput(STOP_COMMAND)
+    subprocess.getoutput("osascript -e 'tell application \"iTunes\" to stop'")
+
+def pause():
+    subprocess.getoutput("osascript -e 'tell application \"iTunes\" to pause'")
+
+def restart_iTunes(track=None, playlist="All New York Islanders Goal Horns", cur=None):
+    subprocess.getoutput("osascript -e 'tell application \"iTunes\" to quit'")
+
+    delay(3)
+    subprocess.getoutput("osascript -e 'tell application \"iTunes\" to run'")
+
+    if track is not None:
+        play(track_name=track, playlist=playlist, curTime=cur)
+
+def speakStatus(overtime, shootout, demo, remote):
+    speechTimer = ShutdownTimer()
+    print("Speaking status...\n")
+    printStatus(overtime, shootout, demo, remote)
+    if overtime: 
+        speechTimer.startTimer(2)
+        play(STATUS_TRACKS[STATUS_NAME_INDEX][OT_INDEX], "Library")
+        while getState() == "playing" and speechTimer.getTimeLeft() > 0: 1
+
+    elif shootout: 
+        speechTimer.startTimer(2)
+        play(STATUS_TRACKS[STATUS_NAME_INDEX][SO_INDEX], "Library")
+        while getState() == "playing" and speechTimer.getTimeLeft() > 0: 1
+    
+    else:
+        speechTimer.startTimer(2)
+        play(STATUS_TRACKS[STATUS_NAME_INDEX][REGULATION_INDEX], "Library")
+        while getState() == "playing" and speechTimer.getTimeLeft() > 0: 1
+
+
+    if demo and getState() == "playing": 
+        speechTimer.startTimer(1)
+        play(STATUS_TRACKS[STATUS_NAME_INDEX][DEMO_INDEX], "Library")
+        while getState() == "playing" and speechTimer.getTimeLeft() > 0: 1
+        speechTimer.startTimer(1)
+        play(STATUS_TRACKS[STATUS_ON_OFF][int(demo)], "Library")
+        while getState() == "playing" and speechTimer.getTimeLeft() > 0: 1
+
+    if remote and getState() == "playing": 
+        speechTimer.startTimer(1)
+        play(STATUS_TRACKS[STATUS_NAME_INDEX][REMOTE_INDEX], "Library")
+        while getState() == "playing" and speechTimer.getTimeLeft() > 0: 1
+        speechTimer.startTimer(1)
+        play(STATUS_TRACKS[STATUS_ON_OFF][int(remote)], "Library")
+        while getState() == "playing" and speechTimer.getTimeLeft() > 0: 1
+
+    if getState() != "playing":
+        print("Status speech cancelled!")
+        play(STATUS_TRACKS[STATUS_NAME_INDEX][CANCEL_INDEX], "Library")
+        delay(1)
+    
+    stop()
 
 def calibrateVolume():
     OG_Vol = getVolume()
+    new_vol = OG_Vol
     done = False
     rate = 10
     
     loopTimer = ShutdownTimer()
     volumeTimer = ShutdownTimer()
 
-    kb = kbHitMod.KBHit()
     command = "\r"
 
-    print("\nCalibrate iTunes volume? \nVolume will start at 50% and \ncontinue rising at a rate of 10% of maximum per second. \nTo calibrate at a different rate, press the tab key. \nTo cancel calibration and remain at the current volume, press 'c'. \nTo continue calibrating at the current rate, press enter. ")
+    print("\nCalibrate iTunes volume? \nVolume will start at 50% and \ncontinue rising at a rate of 10% of maximum per second. \nTo calibrate at a different rate, press the tab key. \nTo cancel calibration and remain at the current volume, press 'c'. \nTo continue calibrating at the current rate, press enter. \nTo quit the entire program, press 'q'.")
 
     stop()
 
-    while command != "c" and command != "\n":
-        command = kb.kbhit()
+    while command != "c" and command != "\n" and command != "q":
+        command = kb.getch()
         kb.off()
 
         if command == "\t":
@@ -254,8 +496,8 @@ def calibrateVolume():
             break
         elif command == "c":
             done = True
-        elif command != "\n" and command != "\r":
-            print("Invalid input! ")
+        elif command == "q":
+            return True
 
           
     delta_vol = rate/5
@@ -266,25 +508,32 @@ def calibrateVolume():
     setVolume(50)
 
     play(GOAL_TRACK)
-    subprocess.getoutput("osascript -e 'tell application \"iTunes\" to set player position to 1.1'")
+    setCurTime(1.1)
 
+    breakout = 10
 
-    print("\nCommencing calibration. Press the space bar to hold at the current volume, \npress it again to begin sweeping in the other direction, \npress 'c' to cancel calibration and restore the original settings, \nor press enter to set the current volume as permanent")
+    print("\nCommencing calibration. Press the space bar to hold at the current volume, \npress it again to begin sweeping in the other direction, \npress 'c' to cancel calibration and restore the original settings, \npress 'q' to quit the entire program, \nor press enter to set the current volume as permanent")
 
-    while done == False:
-        command = kb.kbhit()
+    while done == False and breakout > 0:
+        command = kb.getch()
         kb.off()
 
-        if loopTimer.getTimeLeft() <= 0:
+        if loopTimer.getTimeLeft() <= 0 and breakout == 10:
             play(GOAL_TRACK)
             subprocess.getoutput("osascript -e 'tell application \"iTunes\" to set player position to 1.1'")
             loopTimer.startTimer(4)
             if getVolume() == 0 and volUp == False:
                 volUp = (not volumeTimer.getIsPaused())
                 print("Minimum volume reached!")
+                flash_screen(2, 1)
+                delay(3)
+                continue
             elif getVolume() == 100 and volUp == True:
                 volUp = volumeTimer.getIsPaused()
                 print("Maximum volume reached!")
+                flash_screen(2, 1)
+                delay(3)
+                continue
         
         if command == " ":
             if volumeTimer.getIsPaused() == True:
@@ -308,6 +557,18 @@ def calibrateVolume():
             print("Setting volume to {}%...".format(new_vol))
             
             done = True
+        elif command == "q":
+            return True
+        elif command != "\r":
+            print("Invalid input! ")
+        elif getState() == "paused":
+            while breakout > 0 and getState() == "paused":
+                breakout -= 1
+            if breakout <= 0:
+                new_vol = getVolume()
+                print("Setting volume to {}%...".format(new_vol))
+        else:
+            breakout = 10
                 
         if volumeTimer.getTimeLeft() <= 0 and volumeTimer.getIsPaused() == False:
             direction = 1
@@ -319,25 +580,71 @@ def calibrateVolume():
             
     stop()
     setVolume(new_vol)
+    print("New volume == {}".format(new_vol))
+    flash_screen(3, 1)
+    return False
 
+def cycleThruStatusOptions():
+    old_volume = getVolume()
+    if old_volume < 60:
+        old_volume = 60
+    
+    setVolume(90)
+    songRepeatTimer = ShutdownTimer()
+    songRepeatTimer.startTimer(STATUS_TRACK_LENGTH)
+    play(STATUS_TRACKS[STATUS_CHANGE_INDEX][0], "Library")
+    track = getTrack()
+    delay(0.1)
+
+    new_status = 0
+
+    while getState() != "paused":
+        while True:
+            if getState() == "paused":
+                if new_status == STATUS_CHECK_INDEX:
+                    speakStatus(overtime, shootout, demo, remote); delay(1)
+                    songRepeatTimer.startTimer(STATUS_TRACK_LENGTH)
+                    play(STATUS_TRACKS[STATUS_CHANGE_INDEX][new_status], "Library", curTime=0)
+                    delay(0.1)
+                    continue
+                else:
+                    break
+
+            elif track != getTrack() or getCurTime() < 0.1:
+                new_status += 1
+                new_status = new_status % 9
+                songRepeatTimer.startTimer(STATUS_TRACK_LENGTH)
+                play(STATUS_TRACKS[STATUS_CHANGE_INDEX][new_status], "Library")
+                track = getTrack()
+                delay(0.1)
+            elif songRepeatTimer.getTimeLeft() <= 0:
+                songRepeatTimer.startTimer(STATUS_TRACK_LENGTH)
+                play(STATUS_TRACKS[STATUS_CHANGE_INDEX][new_status], "Library")
+                delay(0.1)
+    
+    setVolume(old_volume)
+
+
+
+
+## CALLBACK FUNCTION AND MAIN #############################################################
 
 def callback(in_data, frame_count, time_info, flag):
         
     audio_data = np.frombuffer(in_data, dtype=np.float32)
     audio_data = np.nan_to_num(audio_data)
 
-    # if mode != NO_GOAL:
-        # audio_data = np.zeros(audio_data.shape, dtype=np.float32)
-    
     audio_data = librosa.resample(audio_data, 44100, 22050)
-    
-    j = 0
+
     for i in audio_data:
         ringBuffer.append(i)
             
     return (in_data, pyaudio.paContinue)
 
+
 if __name__ == "__main__":
+    totalTimer.startTimer(1)
+    runApp("iTunes")
     play(QUIET_TRACK)
     stop()
 
@@ -349,254 +656,369 @@ if __name__ == "__main__":
                     input = True,
                     stream_callback=callback)
 
-    # start the stream
     stream.start_stream()
-    print("Stream open!")
+    print("\nStream open!")
+    if getVolume() == 0:
+        setVolume(90)
 
-    yes = input("Calibrate iTunes volume? Enter 'y' for yes,'q' to quit, and any other key for no: ")
-    while len(ringBuffer.get()) < 22050: 1
-    kb = kbHitMod.KBHit()
+    play(OT_GOAL_TRACK)
 
+    yes = input("\nCalibrate iTunes volume? Current volume is {} \nEnter 'y' for yes,'q' to quit, enter to continue in default mode \nand any other key for no: ".format(getVolume()))
+
+    if yes == "y":
+        quit_ = calibrateVolume()
+    elif yes == "q":
+        quit_ = True
+    else:
+        stop()
+
+
+    while len(ringBuffer.get()) < 22050 and quit_ == False: 1
+
+    if quit_ == False:
+        event_type = " "
+        if yes != "":
+            event_type = input("\nIs this a recap or a full game? \nEnter 'r' for recap, 'g' for full game, 'q' to quit, \nor simply press enter to continue in default mode: ")
+        else:
+            event_type = ""
+
+        while event_type != "r" and event_type != "g" and event_type != "q" and event_type != "":
+            event_type = input("\nInvalid input!\nIs this a recap or a full game? \nEnter 'r' for recap, 'g' for full game, 'q' to quit, or simply press enter to turn off the log timer: ")
+
+        if event_type == "r":
+            logTime = 360
+        elif event_type == "g":
+            logTime = 1500
+        elif event_type == "q":
+            quit_ = True
+        elif event_type == "":
+            logTime = 1500*360
+
+    logTimer.startTimer(logTime)
 
     kbOverload = Counter(0)
     need2save = False
-    limit = 0
+    alerted = True
+    i2 = Counter(0)
 
-    Y = np.empty((44,44), dtype=np.float32)
-    Z = np.empty((44,44), dtype=np.float32)
+    ringBuffer3.append(True)   
+    for i in range(20):
+        ringBuffer3.append(False)    
 
-    in_cooldown = True
-
-    for index in range(31):
-        ringBuffer3.append(True)        
-
-    if yes == "y":
-        calibrateVolume()
-    elif yes == "q":
-        quit_ = True
-    
     if quit_ == False:
-        print("Let's play some hockey!!!")
-    
-    while stream.is_active():
-        JSON_WIN_PATH = "/Users/schoolwork/Documents/Goal_Horn_Project_Stuff/Goal_Horn_Program/Goal_Horn_Program_Subsets/json_datasets/WINS/win_" + str(i.get()) + ".json"
-        ACTUALLY_WIN = "/Users/schoolwork/Documents/Goal_Horn_Project_Stuff/Goal_Horn_Program/Goal_Horn_Program_Subsets/json_datasets/ACTUALLY_WINS/this_IS_a_win_" + str(i3.get()) + ".json"
-        ACTUALLY_NO_PATH = [
-            "/Users/schoolwork/Documents/Goal_Horn_Project_Stuff/Goal_Horn_Program/Goal_Horn_Program_Subsets/json_datasets/ACTUALLY_NOS/actually_no_win_" + str(i2.get()) + ".json", 
-            "placeholder", 
-            "/Users/schoolwork/Documents/Goal_Horn_Project_Stuff/Goal_Horn_Program/Goal_Horn_Program_Subsets/json_datasets/ACTUALLY_NOS/actually_no_goal_" + str(k2.get()) + ".json"
-            ]
-        JSON_NO_GOAL_PATH = "/Users/schoolwork/Documents/Goal_Horn_Project_Stuff/Goal_Horn_Program/Goal_Horn_Program_Subsets/json_datasets/NO_GOALS/no_goal_" + str(j.get()) + ".json"
-        JSON_GOAL_PATH = "/Users/schoolwork/Documents/Goal_Horn_Project_Stuff/Goal_Horn_Program/Goal_Horn_Program_Subsets/json_datasets/GOALS/goal_" + str(k.get()) + ".json"
-        ACTUALLY_GOAL = "/Users/schoolwork/Documents/Goal_Horn_Project_Stuff/Goal_Horn_Program/Goal_Horn_Program_Subsets/json_datasets/ACTUALLY_GOALS/this_IS_a_goal_" + str(k3.get()) + ".json"
-        TBD_FILE = "/Users/schoolwork/Documents/Goal_Horn_Project_Stuff/Goal_Horn_Program/Goal_Horn_Program_Subsets/TBD_FILES/what_is_this_" + str(w2.get()) + "-" + str(w.get())
-        FALSE_NEGATIVE = "/Users/schoolwork/Documents/Goal_Horn_Project_Stuff/Goal_Horn_Program/Goal_Horn_Program_Subsets/TBD_FILES/probable_false_negative_"
-        TRUE_POSITIVE = "/Users/schoolwork/Documents/Goal_Horn_Project_Stuff/Goal_Horn_Program/Goal_Horn_Program_Subsets/TBD_FILES/just_before_the_trigger_"
-        TBD_TRIGGER = "/Users/schoolwork/Documents/Goal_Horn_Project_Stuff/Goal_Horn_Program/Goal_Horn_Program_Subsets/TBD_FILES/probable_goal_or_win_"
-
-        command = kb.kbhit()
-        kb.off()
-        keypressed = True
+        print("Resetting playlist \"New York Islanders Soundboard\"...")
         
-        if kbOverload.get() >= 2:
-            quit_ = True
-            print("Error: Keyboard overloaded! Goodbye!")
-        elif command == "o":
-            shootout = False
-            if overtime == True:
-                overtime = False
-                print("Overtime mode: off\nShootout mode: off\n")
-            else:
-                overtime = True
-                print("Overtime mode: ON\nShootout mode: off\n")
-        elif command == "s":
-            overtime = False
-            if shootout == True:
-                shootout = False
-                print("Overtime mode: off\nShootout mode: off\n")
-            else:
-                shootout = True
-                print("Overtime mode: off\nShootout mode: ON\n")
-        elif command == "q":
-            quit_ = True
-            stop()
-            print("Quitting... goodbye!\n")
-        elif command == "d":
-            demo = (not demo)
-            if demo == True:
-                print("Demo mode: ON")
-            else:
-                print("Demo mode: off")
-        elif (command == "g" or command == "w") and demo == False:
-            print("Starting audible countdown...")
-            play("5-second countdown")
-            print("Get ready...")
+        stop()
+        volume = getVolume()
+        print("volume == {}".format(volume))
+        setVolume(0)
+        play(OT_GOAL_TRACK, curTime=107)
+        trouble = 0
 
-            t = time.time()
-            while getState() == "playing" and time.time() - t < 5.282: 1
+        while getState() == "playing" and getTrack() == OT_GOAL_TRACK and quit_ == False:
+            
+            if trouble >= 30 and getCurTime() <= 107:
+                print("Something's wrong. Try restarting iTunes.")
+                restart_iTunes(OT_GOAL_TRACK, cur=107)
+                if getState() == "paused":
+                    print("Didn't work. Goodbye!")
+                    flash_screen(num_loops=2)
+                    quit_ = True
+                else:
+                    trouble = 0
+            elif getCurTime() <= 107:
+                trouble += 1
 
-            if time.time() - t <= 0:
-                
-                t0 = time.time()   
-                print("GO!")
-                while time.time() - t0 <= 1: 1
-                
-                new_signal = ringBuffer.get()
-                new_signal = np.array(new_signal, np.float32)
-                Y = librosa.feature.mfcc(new_signal, sr=22050, n_mfcc=44, hop_length=512, n_fft=2048)
-                Y = Y.T
-                path = " "
-                if command == "g":
-                    path = ACTUALLY_GOAL
-                    k3.add()
-                else: 
-                    path = ACTUALLY_WIN
-                    i3.add()
+        play(WIN_TRACK, curTime=78.4)
+        trouble = 0
 
-                print("\nDone! Saving to {}...".format(path))
-                with open(path, "w") as fp:
-                    json.dump(Y.tolist(), fp, indent = 4)
+        while getState() == "playing" and getTrack() == WIN_TRACK and quit_ == False:
+            if trouble >= 30 and getCurTime() <= 78.4:
+                print("Something's wrong. Try restarting iTunes.")
+                restart_iTunes(WIN_TRACK, cur=78.4)
+                if getState() == "paused":
+                    print("Didn't work. Goodbye!")
+                    flash_screen(num_loops=2)
+                    quit_ = True
+                else:
+                    trouble = 0
+            elif getCurTime() <= 78.4:
+                trouble += 1
 
-                print("data saved to {}\n".format(path))
-            else:
-                print("Never mind. Recording session cancelled.")
+        setVolume(volume)
+        play(GOAL_TRACK)
+        delay(0.5)
+        setCurTime(40)
+        trouble = 0
 
-        elif command == "v":
-            calibrateVolume()
-            kbOverload.reset()
-        elif command == "l":
-            print("Final orders:")
-            final_orders = input()
-            if final_orders == "play taps" or final_orders == "Play taps":
-                print("Playing \"Taps\"..."); play("Islanders Taps")
+        while getState() == "playing" and getTrack() == GOAL_TRACK and quit_ == False:
+            if trouble >= 30 and getCurTime() <= 40:
+                print("Something's wrong. Try restarting iTunes.")
+                restart_iTunes(GOAL_TRACK, cur=40)
+                if getState() == "paused":
+                    print("Didn't work. Goodbye!")
+                    flash_screen(num_loops=2)
+                    quit_ = True
+                else:
+                    trouble = 0
+            elif getCurTime() <= 40:
+                trouble += 1
 
-                while getState() == "playing": 1
-                quit_ = True; print("(sigh)")
+        play(QUIET_TRACK)
+        while getState() == "playing" and getTrack() == QUIET_TRACK and quit_ == False:
+            trouble += 1
+            if trouble >= 30:
+                print("Something's wrong. Try restarting iTunes.")
+                restart_iTunes(QUIET_TRACK)
+                if getState() == "paused":
+                    print("Didn't work. Goodbye!")
+                    flash_screen(num_loops=2)
+                    quit_ = True
+                else:
+                    trouble = 0
+            
 
-                t = time.time()
-                t_diff = math.ceil(3 - time.time() + t)
 
-                while time.time() - t < 2: 1
-                break
-            else:
-                print("Never mind! We haven't lost yet!")
-                continue
-        elif command == "r":
-            remote = (not remote)
-            if remote == True:
-                print("\nRemote control: ON\n")
-            else:
-                print("\nRemote control: off\n")
-        elif command == " ":
-            print("prediction == {}".format(prediction)) 
-        else:
+        stop()
+    
+        print("\nLet's watch some hockey!!!\n\nOvertime mode: off\nShootout mode: off\nDemo mode: off\nRemote control: off")
+        #flash_screen(3, 2)
+
+    kb = kbHitMod.KBHit()
+        
+    while stream.is_active():
+
+        command = kb.getch()
+        kb.off()
+        
+        if command == "\r":
             keypressed = False
-            kbOverload.reset(0)
-
-        if keypressed == True:
-            kbOverload.add()
-
-        if pauseTimer.getIsRunning():
-            ringBuffer3.append(True)
-            if confirmTimer.getIsRunning() and demo == False:
-                print("no_goal confirmation attempt failed...")
-                logTimer.startTimer(0.9)
-                logTimer.pauseTimer()
-                confirmTimer.stopTimer()
-                n.reset(0)
-            if logTimer.getIsRunning() and logTimer.getTimeLeft() <= 1 and demo == False:
-                logTimer.startTimer(10)
-                logTimer.pauseTimer()
-
-            if getState() == "paused":
-                print("Never mind!")
-                # Horn interrupted quickly, means false positive
-                if shutdownTimer.getIsRunning() == True and (shutdownTimer.getTimeElapsed() >= 40 or shootout) and need2save == True:
-                    if mode == WIN:
-                        with open(JSON_WIN_PATH, "w") as fp:
-                            json.dump(Y.tolist(), fp, indent = 4)
-
-                        print("data saved to {}".format(JSON_WIN_PATH))
-                        i.add()
-                    elif mode == GOAL:
-                        with open(JSON_GOAL_PATH, "w") as fp:
-                            json.dump(Y.tolist(), fp, indent = 4)
-
-                        print("data saved to {}".format(JSON_GOAL_PATH))
-                        k.add()
-                
-                elif pauseTimer.getTimeElapsed() <= 40 and need2save == True:
-                    data = ringBuffer2.get()
-                    for d in data[-3:]:
-                        scipy.io.wavfile.write(TBD_TRIGGER + str(g.get()) + "_" + str(g2.get()) + ".wav", 22050, d)
-                    
-                        d = librosa.feature.mfcc(y=d, sr=22050, n_mfcc=44, hop_length=512, n_fft=2048)
-                        d = d.T
-                        with open(TBD_TRIGGER + str(g.get()) + "_" + str(g2.get()) + ".json", "w") as fp:
-                            json.dump(d.tolist(), fp, indent=4)
-                        
-                        print("Data saved to \n\n{} \nand {}\n".format(TBD_TRIGGER + str(g.get()) + "_" + str(g2.get()) + ".wav", TBD_TRIGGER + str(g.get()) + "_" + str(g2.get())+ ".json"))
-                        
-                        g.add()
-                    
-                    g2.add()
-                    g.reset()
-
-                need2save = False
-                mode = NO_GOAL
-                print("Back to the game! \nlogTimer at T-{}".format(math.ceil(logTimer.getTimeLeft())))
-                pauseTimer.stopTimer()
-                shutdownTimer.stopTimer()
-                stop()
-            # Absolutely no interruptions
-            elif pauseTimer.getTimeLeft() <= 0:
-                print("Back to the game! \nlogTimer at T-{}".format(math.ceil(logTimer.getTimeLeft())))
-                pauseTimer.stopTimer()
-                stop()
-
-                if mode == GOAL and need2save == True:
-                    with open(JSON_GOAL_PATH, "w") as fp:
-                        json.dump(Y.tolist(), fp, indent = 4)
-
-                    print("data saved to {}".format(JSON_GOAL_PATH))
-                    k.add()
-                
-                mode = NO_GOAL
-                need2save = False
-                logTimer.resumeTimer()
-            elif shutdownTimer.getIsRunning() and shutdownTimer.getTimeLeft() <= 0:
-                if need2save == True:
-                    path = [JSON_WIN_PATH, JSON_NO_GOAL_PATH, JSON_GOAL_PATH]
-                    with open(path[mode], "w") as fp:
-                        json.dump(Y.tolist(), fp, indent = 4)
-                    print("data saved to {}".format(path[mode]))
-
-                quit_ = True     
-                print("Game over! Goodbye!\n")
+        else: keypressed = True
 
         if quit_ == True:
             break
-        elif mode != NO_GOAL:
-            freqTimer.pauseTimer()
-        elif getState() == "playing" and mode == NO_GOAL:
-            print("Oh, did I miss something?")
-            need2save = False
-            smoothTimer = ShutdownTimer()
-            smoothTimer.startTimer(5)
+        elif (mode == NO_GOAL and pauseTimer.getIsRunning() == False) or loop_thru == True:
+            signal = ringBuffer.get()
+            signal = np.array(signal, np.float32)
+            ringBuffer2.append(signal)
+            ringBuffer2a.append(ringBuffer.get_diff())
             
-            if overtime and getTrack() != OT_GOAL_TRACK:
-                play(OT_GOAL_TRACK)
-            elif shootout and getTrack() != WIN_TRACK:
-                play(WIN_TRACK)
-                smoothTimer.startTimer(5)
-            elif getTrack() != GOAL_TRACK:
-                play(GOAL_TRACK)
+            ringBuffer3.append(loop_thru)
 
-            while smoothTimer.getTimeLeft() > 3:
-                if getState() == "paused":
+            cooldown_nums = ringBuffer3.get()
+            cooled = cooldown_nums.count(True)
+            if cooled == 0 and alerted == False:
+                print("\nAnd we're back!")
+                alerted = True
+                loop_thru = False
+                cooldownTimer.startTimer(10)
+            elif len(cooldown_nums) == 24:
+                print("\nAnd we're live!")
+                cooldownTimer.startTimer(10)
+            elif cooled > 0 and alerted == False and loop_thru == False:
+                continue
+
+            if signal.shape[0] == 22050 and (mode == NO_GOAL or loop_thru == True):
+
+                X = librosa.feature.mfcc(signal, sr=22050, n_mfcc=44, hop_length=512, n_fft=2048)
+                X = X.T
+
+                X_new = X[np.newaxis, ...]
+                prediction = model(X_new) 
+                
+                if (np.argmax(prediction) != NO_GOAL and cooled == 0) or loop_thru == True:
+                    i2.add()
+                    if loop_thru == False:
+                        mode = np.argmax(prediction)
+                        loop_thru = True
+                        #print("Goal!")
+                        #continue
+                    elif i2.get() <= 12: # was 15
+                        continue
+                    else:
+                        i2.reset()
+                        loop_thru = False
+                        #cooled -= 100
+                        
+                        
+                if mode == GOAL and cooled == 0:
+                    print("prediction == {}".format(prediction))
+                    #state = getState()
+                    #track_name = getTrack()
+                    #mode = GOAL
+                    alerted = False
+                    #cooled += 100
+
+                    #if state == "paused" or ((track_name != GOAL_TRACK and track_name != WIN_TRACK and track_name != OT_GOAL_TRACK) or track_name == QUIET_TRACK):
+                    if overtime:
+                        pauseTimer.startTimer(108)
+                        play(OT_GOAL_TRACK)
+                        print("Goal! We win!")
+                    elif shootout:
+                        print("Shootout goal! We win?")
+                        pauseTimer.startTimer(79.44)
+                        play(WIN_TRACK)
+                    else:
+                        print("Goal!")
+                        pauseTimer.startTimer(42.353)
+                        play(GOAL_TRACK)
+
+                        print("\n")
+
+                        """
+                        for i in range(3):
+                            signal = ringBuffer.get()
+                            signal = np.array(signal, np.float32)
+                            ringBuffer2.append(signal)
+                            ringBuffer3.append(True)
+                            delay(0.1)
+                        """
+                        continue #uncomment this if you comment the continue when loop_thru is set to true
+                            
+                elif mode == WIN and cooled == 0:
+                    print("prediction == {}".format(prediction))
+                    #state = getState()
+                    #track_name = getTrack()
+                    #mode = WIN
+                    alerted = False
+                    #cooled += 100
+
+                    #if state == "paused" or ((track_name != GOAL_TRACK and track_name != WIN_TRACK and track_name != OT_GOAL_TRACK) or track_name == QUIET_TRACK):
+                    play(WIN_TRACK)
+                    pauseTimer.startTimer(79.44)
+                    """
+                    for i in range(3):
+                        signal = ringBuffer.get()
+                        signal = np.array(signal, np.float32)
+                        ringBuffer2.append(signal)
+                        ringBuffer3.append(True)
+                        delay(0.1)
+                    """
+            
+                    print("We win!\n")
+                    continue #uncomment this if you comment the continue when loop_thru is set to true
+                
+                elif mode != NO_GOAL and demo == False:
+                    data = ringBuffer2.get()
+                    timestamps = ringBuffer2a.get()
+                    timestamps[-25] = 0
+                    while os.path.exists(TRIGGER_POSITIVE + trigger_num.gets()+ "_" + trigger_num2.gets() + ".wav"):
+                        trigger_num.add()
+                        trigger_num2.reset()
+
+                    with open(TRIGGER_POSITIVE + trigger_num.gets() + "_" + "timestamps.json", "w") as fp0:
+                        json.dump(timestamps[-25:], fp0, indent=4)
+
+                    print("Timestamps saved to \n{}\n".format(TRIGGER_POSITIVE + trigger_num.gets() + "_" + "timestamps.json"))
+
+                    for d in data[-25:]:
+                        scipy.io.wavfile.write(TRIGGER_POSITIVE + trigger_num.gets()+ "_" + trigger_num2.gets() + ".wav", 22050, d)
+                    
+                        d = librosa.feature.mfcc(y=d, sr=22050, n_mfcc=44, hop_length=512, n_fft=2048)
+                        d = d.T
+                        with open(TRIGGER_POSITIVE + trigger_num.gets() + "_" + trigger_num2.gets() + ".json", "w") as fp:
+                            json.dump(d.tolist(), fp, indent=4)
+                        
+                        print("Data saved to \n{} \nand {}\n".format(TRIGGER_POSITIVE + trigger_num.gets() + "_" + trigger_num2.gets() + ".wav", TRIGGER_POSITIVE + trigger_num.gets() + "_" + trigger_num2.gets() + ".json"))
+                        
+                        trigger_num2.add()
+
+                    trigger_num.add()
+                    trigger_num2.reset()
+
+                elif logTimer.getTimeLeft() <= 0 and demo == False and cooldownTimer.getTimeLeft() <= 0 and cooldownTimer.getIsRunning() == True and np.argmax(prediction) == mode == NO_GOAL:
+                    logTimeCurrent = logTime + logTimer.getTimeLeft()
+                    logTimer.startTimer(logTimeCurrent)
+                    data = ringBuffer2.get()
+                    while os.path.exists(LOG_FILE + log_num.gets()+ "_" + log_num2.gets() + ".wav"):
+                        log_num.add()
+                        log_num2.reset()
+
+                    timestamps = ringBuffer2a.get()
+                    timestamps[-10] = 0
+                
+                    with open(LOG_FILE + log_num.gets() + "_" + "timestamps.json", "w") as fp0:
+                        json.dump(timestamps[-10:], fp0, indent=4)
+
+                    print("Timestamps saved to \n{}\n".format(LOG_FILE + log_num.gets() + "_" + "timestamps.json"))
+
+                    for d in data[-10:]:
+                        scipy.io.wavfile.write(LOG_FILE + log_num.gets()+ "_" + log_num2.gets() + ".wav", 22050, d)
+                    
+                        d = librosa.feature.mfcc(y=d, sr=22050, n_mfcc=44, hop_length=512, n_fft=2048)
+                        d = d.T
+                        with open(LOG_FILE + log_num.gets() + "_" + log_num2.gets() + ".json", "w") as fp:
+                            json.dump(d.tolist(), fp, indent=4)
+                        
+                        print("Data saved to \n{} \nand {}\n".format(LOG_FILE + log_num.gets() + "_" + log_num2.gets() + ".wav", LOG_FILE + log_num.gets() + "_" + log_num2.gets() + ".json"))
+                        
+                        log_num2.add()
+
+                    log_num.add()
+                    log_num2.reset()
+
+        state = getState()
+        
+        if pauseTimer.getIsRunning():
+            cooldownTimer.stopTimer()
+            if getState() == "paused" or getTrack() == QUIET_TRACK:
+                if pauseTimer.getTimeElapsed() <= 3:
+                    print("Never mind!")
+                
+                print("Back to the game!")
+                if demo:
+                    print("Demo mode: ON")
+                else:
+                    print("Demo mode: off")
+
+                pauseTimer.stopTimer()
+                mode = NO_GOAL
+                stop()
+
+                #for i in range(10):
+                #ringBuffer3.append(False)
+
+            elif pauseTimer.getTimeLeft() <= 0:
+                print("Back to the game!")
+                
+                if demo:
+                    print("Demo mode: ON")
+                else:
+                    print("Demo mode: off")
+
+                pauseTimer.stopTimer()
+                mode = NO_GOAL
+                stop()
+            elif pauseTimer.getTimeLeft() < 4:
+                if mode == WIN or overtime or shootout:
+                    quit_ = True     
+                    print("Game over! Goodbye!\n")  
+                else:
+                    ringBuffer3.append(False)
+                    ringBuffer3.append(False)
+                    ringBuffer3.append(False)
+            #else:
+                #for i in range(10):
+                #ringBuffer3.append(True)
+        elif state == "playing" and mode == NO_GOAL:
+            print("Oh, did I miss something?")
+            smoothTimer = ShutdownTimer()
+            smoothTimer.startTimer(3)
+            
+            if remote == False:
+                if overtime and getTrack() != OT_GOAL_TRACK:
+                    play(OT_GOAL_TRACK)
+                elif shootout and getTrack() != WIN_TRACK:
+                    play(WIN_TRACK)
+                    smoothTimer.startTimer(3)
+                elif getTrack() != GOAL_TRACK:
+                    play(GOAL_TRACK)
+
+            while smoothTimer.getTimeLeft() >= 0:
+                if getState() == "paused" and remote == False:
                     if getTrack() != WIN_TRACK:
                         play(WIN_TRACK)
-                        smoothTimer.startTimer(8)
+                        smoothTimer.startTimer(3)
                     else:
                         mode = NO_GOAL
                         stop()
@@ -604,235 +1026,234 @@ if __name__ == "__main__":
                         print("I guess not!")
                         break
 
-            while getState() == "playing" and mode == NO_GOAL:
-                if smoothTimer.getTimeLeft() <= 2:
-                    track = getTrack()
-                    if (track == GOAL_TRACK or track == OT_GOAL_TRACK) and smoothTimer.getTimeLeft() <= 0:
-                        mode = GOAL
-                        if overtime == False:    
-                            pauseTimer.startTimer(42.253 - smoothTimer.getTimeElapsed())
-                        elif overtime == True:
-                            pauseTimer.startTimer(108 - smoothTimer.getTimeElapsed())
-                            shutdownTimer.startTimer(105 - smoothTimer.getTimeElapsed())
-                    elif track == WIN_TRACK or shootout:
-                        state = getState()
-                        if shootout == True and state == "paused" and smoothTimer.getTimeLeft() > 0:
-                            mode = GOAL
-                        elif smoothTimer.getTimeLeft() <= 0:
-                            mode = WIN
-
-                        if mode != NO_GOAL:
-                            shutdownTimer.startTimer(75 - smoothTimer.getTimeElapsed())
-                            pauseTimer.startTimer(79.44 - smoothTimer.getTimeElapsed())
-
-            if mode != NO_GOAL:
-                manual = True
-                print("I guess I did!")
-                data = ringBuffer2.get()
-                for d_num in range(len(data)):
-                    if d_num % 2 == 0:
-                        continue
-
-                    d = data[d_num]
-                    scipy.io.wavfile.write(FALSE_NEGATIVE + str(h.get()) + ".wav", 22050, d)
-                    
-                    d = librosa.feature.mfcc(y=d, sr=22050, n_mfcc=44, hop_length=512, n_fft=2048)
-                    d = d.T
-                    with open(FALSE_NEGATIVE + str(h.get()) + ".json", "w") as fp:
-                        json.dump(d.tolist(), fp, indent=4)
-                    
-                    print("Data saved to \n\n{} \nand {}\n".format(FALSE_NEGATIVE + str(h.get()) + ".wav", FALSE_NEGATIVE + str(h.get()) + ".json"))
-                    
-                    h.add()
-
-                print("Data saved for manual sorting! \nmode == {}".format(mode_names[mode]))
-        else:      
-            signal = ringBuffer.get()
-            signal = np.array(signal, np.float32)
-
-            ringBuffer2.append(signal)
-
-            if signal.shape[0] == 22050 and mode == NO_GOAL and keypressed == False:
-
-                X = librosa.feature.mfcc(signal, sr=22050, n_mfcc=44, hop_length=512, n_fft=2048)
-                X = X.T
-
-                X_new = X[np.newaxis, ...]
-                prediction = model(X_new) 
-                    
-                if np.argmax(prediction) == GOAL:
-                    # GOAL!! 
-                    state = getState()
-                    track_name = getTrack()
-                    Y = X
-                    mode = GOAL
-                    print("prediction == {}".format(prediction))
-
-                    if state == "paused" or ((track_name != GOAL_TRACK and track_name != WIN_TRACK and track_name != OT_GOAL_TRACK) or track_name == QUIET_TRACK):
-                        if overtime:
-                            shutdownTimer.startTimer(105)
-                            pauseTimer.startTimer(108)
-                            play(OT_GOAL_TRACK)
-                            print("Goal! We win!")
-                            need2save = (not demo)
-                        elif shootout:
-                            print("Shootout goal! We win?")
-                            shutdownTimer.startTimer(75)
-                            pauseTimer.startTimer(79.44)
-                            need2save = (not demo)
-                            play(WIN_TRACK)
-                        else:
-                            print("Goal!")
-                            pauseTimer.startTimer(42.353)
-                            need2save = (not demo)
-                            play(GOAL_TRACK)
-
-                        print("\n")
-
-                    if need2save == True:
-                        data = ringBuffer2.get()
-                        for d in data[-15:]:
-                            scipy.io.wavfile.write(TRUE_POSITIVE + str(h2.get()) + "_" + str(h3.get()) + ".wav", 22050, d)
-                        
-                            d = librosa.feature.mfcc(y=d, sr=22050, n_mfcc=44, hop_length=512, n_fft=2048)
-                            d = d.T
-                            with open(TRUE_POSITIVE + str(h2.get()) + "_" + str(h3.get()) + ".json", "w") as fp:
-                                json.dump(d.tolist(), fp, indent=4)
-                            
-                            print("Data saved to \n\n{} \nand {}\n".format(TRUE_POSITIVE + str(h2.get()) + "_" + str(h3.get()) + ".wav", TRUE_POSITIVE + str(h2.get()) + "_" + str(h3.get()) + ".json"))
-                            
-                            h3.add()
-
-                        h2.add()
-                        h3.reset()
-
-                        
-                # decides if the last 1 second of audio contains a win
-                elif np.argmax(prediction) == WIN:
-                    state = getState()
-                    track_name = getTrack()
-                    Y = X
-                    mode = WIN
-                    print("prediction == {}".format(prediction))
-
-                    if state == "paused" or ((track_name != GOAL_TRACK and track_name != WIN_TRACK and track_name != OT_GOAL_TRACK) or track_name == QUIET_TRACK):
-                        play(WIN_TRACK)
-                        shutdownTimer.startTimer(75)
-                        pauseTimer.startTimer(79.44)
-                        need2save = (not demo)
             
-                    print("We win!\n")
+            if getState() == "playing":
+                print("I guess I did!")
+                track = getTrack()
+                if track == GOAL_TRACK or track == OT_GOAL_TRACK or shootout:
+                    mode = GOAL
+                    if shootout == True:
+                        pauseTimer.startTimer(79.44 - smoothTimer.getTimeElapsed())
+                    elif overtime == True:
+                        pauseTimer.startTimer(108 - smoothTimer.getTimeElapsed())
+                    else:    
+                        pauseTimer.startTimer(42.253 - smoothTimer.getTimeElapsed())
                     
-                    if need2save == True:
-                        data = ringBuffer2.get()
-                        for d in data[-15:]:
-                            scipy.io.wavfile.write(TRUE_POSITIVE + str(h2.get()) + "_" + str(h3.get()) + ".wav", 22050, d)
+                elif track == WIN_TRACK:
+                    mode = WIN
+                    pauseTimer.startTimer(79.44 - smoothTimer.getTimeElapsed())
+
+                if demo == False:    
+                    data = ringBuffer2.get()
+                    while os.path.exists(FALSE_NEGATIVE + false_num.gets() + "_" + false_num2.gets() + ".wav"):
+                        false_num.add()
+                        false_num2.reset()
+
+                    timestamps = ringBuffer2a.get()
+                    timestamps[0] = 0
+                    
+                    with open(FALSE_NEGATIVE + false_num.gets() + "_" + "timestamps.json", "w") as fp0:
+                        json.dump(timestamps, fp0, indent=4)
+
+                    print("Timestamps saved to \n{}\n".format(FALSE_NEGATIVE + false_num.gets() + "_" + "timestamps.json"))
+
+                    print("len(data) == {}".format(len(data)))
+
+                    for d in data:
+                        scipy.io.wavfile.write(FALSE_NEGATIVE + false_num.gets() + "_" + false_num2.gets() + ".wav", 22050, d)
                         
-                            d = librosa.feature.mfcc(y=d, sr=22050, n_mfcc=44, hop_length=512, n_fft=2048)
-                            d = d.T
-                            with open(TRUE_POSITIVE + str(h2.get()) + "_" + str(h3.get()) + ".json", "w") as fp:
-                                json.dump(d.tolist(), fp, indent=4)
-                            
-                                print("Data saved to \n\n{} \nand {}\n".format(TRUE_POSITIVE + str(h2.get()) + "_" + str(h3.get()) + ".wav", TRUE_POSITIVE + str(h2.get()) + "_" + str(h3.get()) + ".json"))
-                            
-                            h3.add()
-
-                        h2.add()
-                        h3.reset()
-
-                # saves potential false negatives as both a json and as a wav file for later inspection
-                elif prediction[0][GOAL] >= 1.0 * (10 ** THRESHOLD) or prediction[0][WIN] >= 1.0 * (10 ** (THRESHOLD)):
-                    A = ringBuffer.get()
-                    A = np.array(A, dtype=np.float32)
-
-                    if prediction[0][GOAL] >= 10 ** (-5) or prediction[0][WIN] >= 10 ** (-5):
-                        limit += 1
-                    elif helpTimer.getTimeLeft() > 0 and helpTimer.getIsRunning() == True:
-                        continue
-                    else:
-                        print("prediction == {}".format(prediction))
-
-                        scipy.io.wavfile.write(TBD_FILE + ".wav", 22050, A)
-                        with open(TBD_FILE + ".json", "w") as fp:
-                            json.dump(X.tolist(), fp, indent=4)
-
-                        print("Data needing classification saved to \n\n{}.wav and\n{}.json".format(TBD_FILE, TBD_FILE))
-                        w.add()
-
-                        helpTimer.startTimer(0.5)
-
-                    if freqTimer.getIsRunning() == False and freqTimer.getIsPaused() == False:
-                        freqTimer.startTimer(10)
-                    elif freqTimer.getTimeLeft() <= 0:
-                        freqTimer.startTimer(10)
-                        if w.get() > 1:
-                            w.reset(); w2.add()
-                        else:
-                            THRESHOLD -= 0.5
-                        if THRESHOLD < MIN_THRESH:
-                            THRESHOLD = MIN_THRESH
-                            print("Minimum threshold reached!")
-                        else:
-                            print("Lowering threshold to 10^({})...".format(THRESHOLD))
-                        limit = 0
-                    elif w.get() > 3 + limit:
-                        freqTimer.startTimer(10)
-                        w.reset(); w2.add(); 
-                        THRESHOLD += 1
-                        if THRESHOLD > MAX_THRESH:
-                            THRESHOLD = MAX_THRESH
-                            print("Maximum threshold reached!")
-                        else:
-                            print("Increasing threshold to 10^({})...".format(THRESHOLD))
-                        limit = 0
-                
-
-                elif np.argmax(prediction) == NO_GOAL and pauseTimer.getIsRunning() == False:
-                    if confirmTimer.getIsRunning(): 
-                        if confirmTimer.getTimeLeft() <= 0:
-                            with open(JSON_NO_GOAL_PATH, "w") as fp:
-                                json.dump(Z.tolist(), fp, indent = 4)
-
-                                print("Last ten seconds had no goals. Data saved to {}\n".format(JSON_NO_GOAL_PATH))
-
-                            j.add()
-                            confirmTimer.stopTimer()
-                            n.reset(0)
-                            logTimer.startTimer(INTERVAL)
-                    elif n.get() == 1:
-                        Z = X
-                        confirmTimer.startTimer(10)
-                        print("Attempting to confirm 'no_goal' sample...")
-                    elif logTimer.getTimeLeft() <= 0:
-                        n.add()
-                        logTimer.stopTimer()
-                    elif logTimer.getIsRunning() == False:
-                        n.reset(0)
-                        logTimer.startTimer(INTERVAL)
-                        print("logTimer started. T-{} seconds...".format(INTERVAL))
+                        d = librosa.feature.mfcc(y=d, sr=22050, n_mfcc=44, hop_length=512, n_fft=2048)
+                        d = d.T
+                        with open(FALSE_NEGATIVE + false_num.gets() + "_" + false_num2.gets() + ".json", "w") as fp:
+                            json.dump(d.tolist(), fp, indent=4)
+                        
+                        print("Data saved to \n{} \nand {}\n".format(FALSE_NEGATIVE + false_num.gets() + "_" + false_num2.gets() + ".wav", FALSE_NEGATIVE + false_num.gets() + "_" + false_num2.gets() + ".json"))
+                        
+                        false_num2.add()
                     
-                    if prediction[0][NO_GOAL] == 1 and freqTimer.getIsRunning() == True:
-                        freqTimer.pauseTimer()
-                    elif freqTimer.getIsPaused() == True:
-                        freqTimer.resumeTimer()
+                    false_num2.reset()
+                    false_num.add()
+
+                    print("Data saved for manual sorting! \nmode == {}".format(mode_names[mode]))     
+
+
+
+        if keypressed == True:
+            kbOverload.add()
+            if kbOverload.get() >= 2:
+                quit_ = True
+                print("Error: Keyboard overloaded! Goodbye!")
+            elif command == "o":
+                shootout = False
+                if overtime == True:
+                    overtime = False
+                    print("Overtime mode: off\nShootout mode: off\n")
+                else:
+                    overtime = True
+                    print("Overtime mode: ON\nShootout mode: off\n")
+            elif command == "s":
+                overtime = False
+                if shootout == True:
+                    shootout = False
+                    print("Overtime mode: off\nShootout mode: off\n")
+                else:
+                    shootout = True
+                    print("Overtime mode: off\nShootout mode: ON\n")
+            elif command == "q":
+                quit_ = True
+                stop()
+                print("Quitting... goodbye!\n")
+            elif command == "d":
+                demo = (not demo)
+                if demo == True:
+                    print("Demo mode: ON")
+                else:
+                    print("Demo mode: off")
+            elif command == "c":
+                quit_ = calibrateVolume()
+                kbOverload.reset()
+            elif command == "v":
+                play(OT_GOAL_TRACK)
+                command = input("\nCurrent volume is {}.\nEnter desired volume from 1 to 100, 'c' to cancel or \n'q' to quit the program: ".format(getVolume()))
+    
+                if is_integer(command) == True:
+                    setVolume(int(command))
+                    print("\nNew volume is {}.".format(getVolume()))
+                    flash_screen(3, 1)
+                elif command == "q":
+                    quit_ = True
+                elif command != "c": 
+                    print("\nHuh? Never mind.")
+                else:
+                    print("\nNever mind.")
+
+                if quit_ == False:
+                    delay(3)
+
+                stop()
+                kbOverload.reset()
+            elif command == "m":
+                if logTime == 360:
+                    logTime = 1500
+                    logTimer.addTime(1140)
+                    print("\nGame mode: FULL GAME")
+                elif logTime == 360*1500:
+                    logTime = 360
+                    logTimer.addTime(-360*1499)
+                    print("\nGame mode: RECAP")
+                elif logTime == 360*1500:
+                    logTime = 360*1500
+                    logTimer.addTime(359*1500)
+                    print("\nGame mode: NONE")
+
+
+                print("logTimer reads {} seconds elapsed".format(logTimer.getTimeElapsed()))
+                print("logTimer reads T-{}".format(logTimer.getTimeLeft()))
+            elif command == "p":
+                muteTime = time.time()
+                state = getState()
+                track = getTrack()
+                position = pauseTimer.getTimeElapsed()
+
+                if pauseTimer.getIsRunning():
+                    pauseTimer.pauseTimer()
+                if cooldownTimer.getIsRunning():
+                    cooldownTimer.pauseTimer()
+                logTimer.pauseTimer()
+
+                if state == "playing":
+                    position = getCurTime()
+                    pause()
+
+
+                command = input("Enter 'q' to quit, or any other key to resume: ")
+
+                muteTimer = time.time() - muteTime
+                total_pause_time += int(muteTimer)
+
+                if command == "q":
+                    quit_ = True
+                    print("\nYou were paused for {}.\n".format(convert_time(muteTimer, shorten=True)))
+                    break
+                else:
+                    print("\nYou were paused for {}.\nTotal pause time: {}\n".format(convert_time(muteTimer, shorten=True), convert_time(total_pause_time, shorten=True)))
+                    if pauseTimer.getIsPaused():
+                        pauseTimer.resumeTimer()
+                    if cooldownTimer.getIsPaused():
+                        cooldownTimer.resumeTimer()
+                    logTimer.resumeTimer()
+
+                if state == "playing" or track != getTrack():
+                    play(track, curTime=position)
+                elif state == "playing":
+                    play()
+                    if position != getCurTime() and position != 0:
+                        play(curTime=position)
+                else:
+                    print("If you can't hear this, check your speakers.")
+                    play(GOAL_TRACK)
+                    delay(0.9)
+                    play(QUIET_TRACK)
+                    stop()
+
+                ghost = True
+                while getState() == "playing" and pauseTimer.getTimeLeft() > 0: 
+                    if pauseTimer.getTimeLeft() > 4 or not (mode == WIN or ((shootout or overtime) and mode == GOAL)):
+                        ghost = False
+                        break
+
+                printStatus(overtime, shootout, demo, remote)
+                if ghost == True:
+                    print("\nlogTimer reads T-{}".format(math.floor(logTimer.getTimeLeft())))
+
+                    if logTime <= 300: print("game_type == RECAP")
+                    else: print("game_type == FULL GAME")
+                
+            elif command == "l":
+                print("Final orders:")
+                final_orders = input()
+                if final_orders == "play taps" or final_orders == "Play taps":
+                    print("Playing \"Taps\"..."); play("Islanders Taps", "Library")
+
+                    while getState() == "playing" and getTrack() == "Islanders Taps": 1
+
+                    quit_ = True; print("(sigh)"); stop()
+                    pauseTimer.startTimer(4)
+                    break
+                else:
+                    print("Never mind! We haven't lost yet!")
+                    continue
+            elif command == "r":
+                remote = (not remote)
+                if remote == True:
+                    print("\nRemote control: ON\n")
+                else:
+                    print("\nRemote control: off\n")
+            elif command == " ":
+                print("prediction == {}".format(prediction))
+        else:
+            kbOverload.reset(0)  
+            
         
     stream.close()
     pa.terminate()
 
-    clock = -1000
+    while pauseTimer.getIsRunning() == True and pauseTimer.getTimeLeft() > 3 and getState() == "playing": 1
 
-    while getState() == "playing" and pauseTimer.getIsRunning():
-        if pauseTimer.getTimeLeft() <= 0 or (getTrack() != WIN_TRACK and getTrack() != OT_GOAL_TRACK):
-            stop()
-            pauseTimer.stopTimer()
-        elif clock != math.floor(pauseTimer.getTimeLeft()):
-            clock = math.floor(pauseTimer.getTimeLeft())
-            if clock <= 3 and clock > 0:
-                print(str(clock) + "...\t", end=' ')
-            elif clock <= 0:
-                print("0", end=' ')
-
-    print("\nProgram terminated. \n")
+    if pauseTimer.getTimeLeft() <= 3 and pauseTimer.getIsRunning() == True and (getTrack() == WIN_TRACK or getTrack() == OT_GOAL_TRACK):
+        
+        pauseTimer.startTimer(3)
+        print("{}...".format(str(3), end=' ', flush=True))
+        delay(pauseTimer.getTimeLeft()-2)
+        print("{}...".format(str(2), end=' ', flush=True))
+        delay(pauseTimer.getTimeLeft()-1)
+        print("{}...".format(str(1), end=' ', flush=True))
+        delay(pauseTimer.getTimeLeft())
+        print("0.")
+    
+    stop()
+    total_run_time = totalTimer.getTimeElapsed()
+    print("\nTotal active time: \t{}\nTotal pause time: \t{} \nTotal runtime: \t\t{}\n\nProgram terminated. \n".format(convert_time(total_run_time-total_pause_time, ":"), convert_time(total_pause_time, ":"), convert_time(total_run_time, ":")))
 
 
 
